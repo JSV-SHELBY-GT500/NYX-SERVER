@@ -1,25 +1,29 @@
 {
-  "name": "nyxos-ai-server",
-  "version": "1.0.0",
-  "description": "Servidor principal para la inteligencia artificial NyxOS.",
+  "name": "nyx-os-monorepo",
+  "version": "3.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Root controller and backend for the Nyx OS v3.0 ecosystem.",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "postinstall": "npm install --prefix \"INTERFAZ ANDROID/NYX\"",
+    "start": "node launcher.js",
+    "dev": "node launcher.js",
+    "dev:backend": "nodemon server.js"
   },
-  "keywords": [
-    "ai",
-    "nyxos",
-    "nodejs",
-    "express",
-    "ia",
-    "websocket"
-  ],
-  "author": "NyxOS Project",
-  "license": "Apache-2.0",
+  "author": "Nyx OS AI Developer",
+  "license": "UNLICENSED",
   "dependencies": {
+    "@google-cloud/vertexai": "^0.6.0",
+    "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
-    "ws": "^8.17.1"
+    "firebase-admin": "^12.1.0",
+    "ws": "^8.17.0"
+  },
+  "devDependencies": {
+    "chalk": "^4.1.2",
+    "nodemon": "^3.1.0",
+    "tree-kill": "^1.2.2"
   }
 }

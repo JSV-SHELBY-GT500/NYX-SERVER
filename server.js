@@ -1,89 +1,192 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
- */
+import http from 'http';
+import { WebSocketServer } from 'ws';
+import express from 'express';
+import cors from 'cors';
+import 'dotenv/config';
 
-// Cargar variables de entorno desde el archivo .env al inicio de la aplicación
-require('dotenv').config();
+// Importar la configuración de Firebase para asegurar la inicialización al arranque.
+import { db, auth } from './config/firebase.js';
+import { processWebSocketMessage } from './controllers/agentController.js'; // Main AI chat processor
+import { errorHandler } from './middleware/errorHandler.js';
+import * as tools from './tools/tools.js'; // Import tools for direct use
 
-const express = require('express');
-const http = require('http');
-const { WebSocketServer } = require('ws');
-const crypto = require('crypto');
-const nyxRoutes = require('./api/routes/nyx.routes');
-const nyxAgent = require('./core/nyx.agent');
+// Importar rutas modulares
+import tasksRouter from './routes/tasks.js';
+import notesRouter from './routes/notes.js';
+import expensesRouter from './routes/expenses.js';
 
-// Crear una instancia de la aplicación Express
 const app = express();
-const server = http.createServer(app); // Crear un servidor HTTP a partir de la app de Express
+const server = http.createServer(app);
+const wss = new WebSocketServer({ server, maxPayload: 10 * 1024 * 1024 }); // 10MB payload limit for images
+const port = process.env.PORT || 8080;
 
-// Definir el puerto del servidor, usando la variable de entorno o 8080 como predeterminado
-const PORT = process.env.PORT || 8080;
+// Middleware
+app.use(cors()); // Habilitar CORS para todas las rutas
+app.use(express.json()); // Para parsear application/json
 
-// Middleware para permitir que Express parsee cuerpos de solicitud en formato JSON
-app.use(express.json());
-
-// Montar el enrutador de la API de Nyx en la ruta base /api/nyx para peticiones REST
-app.use('/api/nyx', nyxRoutes);
-
-// Ruta raíz (/) para verificar que el despliegue fue exitoso
+// Ruta de prueba para verificar que el servidor está vivo
 app.get('/', (req, res) => {
-  res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.send('<h1>NyxOS AI is running.</h1><p>El despliegue ha sido exitoso.</p>');
+    res.send('Nyx V3.0 Backend: El Sacrificio Inicial ha sido completado. El santuario está listo.');
 });
 
-// --- Configuración del Servidor WebSocket ---
-const wss = new WebSocketServer({ server });
+// Usar las rutas de la API
+app.use('/api/tasks', tasksRouter);
+app.use('/api/notes', notesRouter);
+app.use('/api/expenses', expensesRouter);
 
-wss.on('connection', (ws) => {
-  console.log('Cliente conectado vía WebSocket.');
-
-  ws.on('message', async (message) => {
-    const requestId = crypto.randomUUID();
-    const timestamp = new Date().toISOString();
-    
+/**
+ * Handles the final step of sending a user-confirmed quote.
+ * This is a direct workflow, not involving the AI agent.
+ */
+async function handleSendQuote(ws, { quoteId, userId }) {
     try {
-      const { task, data } = JSON.parse(message);
-      console.log(`[${requestId}] Tarea recibida vía WebSocket: ${task}`);
-
-      const result = await nyxAgent.processTask(task, data);
-
-      ws.send(JSON.stringify({
-        success: true,
-        requestId,
-        timestamp,
-        response: result
-      }));
-
+        await db.collection('quotes').doc(quoteId).update({ status: 'sent', confirmedAt: new Date() });
+        await tools.logActivity({ userId, description: `Cotización ${quoteId} confirmada y enviada.` });
+        ws.send(JSON.stringify({
+            event: 'notification',
+            payload: { type: 'success', message: `Cotización ${quoteId} enviada con éxito.` }
+        }));
     } catch (error) {
-      console.error(`[${requestId}] Error procesando mensaje de WebSocket:`, error.message);
-      
-      const statusCode = error.statusCode || 500;
-      const message = statusCode < 500 ? error.message : 'Ocurrió un error interno en el servidor.';
-
-      ws.send(JSON.stringify({
-        success: false,
-        requestId,
-        timestamp,
-        error: {
-          message: message,
-          details: statusCode >= 500 ? error.message : undefined
-        }
-      }));
+        console.error('[handleSendQuote] Error:', error);
+        ws.send(JSON.stringify({ event: 'error', payload: `Error al enviar la cotización ${quoteId}.` }));
     }
-  });
+}
 
-  ws.on('close', () => {
-    console.log('Cliente desconectado de WebSocket.');
-  });
+/**
+ * Handles requests related to the development workflow.
+ */
+async function handleDevWorkflow(ws, event, payload) {
+    const { userId, requestId, status } = payload;
 
-  ws.on('error', (error) => {
-    console.error('Error en la conexión WebSocket:', error);
-  });
+    switch (event) {
+        case 'request-dev-requests':
+            try {
+                const snapshot = await db.collection('developmentRequests').orderBy('createdAt', 'desc').get();
+                const requests = [];
+                snapshot.forEach(doc => requests.push({ id: doc.id, ...doc.data() }));
+                ws.send(JSON.stringify({ event: 'dev-requests-loaded', payload: requests }));
+            } catch (error) {
+                console.error('[handleDevWorkflow] Error fetching dev requests:', error);
+                ws.send(JSON.stringify({ event: 'error', payload: 'No se pudieron cargar las peticiones de desarrollo.' }));
+            }
+            break;
+
+        case 'update-dev-request-status':
+            try {
+                if (!requestId || !status || !userId) {
+                    throw new Error('Faltan requestId, status o userId.');
+                }
+                const docRef = db.collection('developmentRequests').doc(requestId);
+                await docRef.update({ status });
+                await tools.logActivity({ userId, description: `Petición de desarrollo ${requestId} actualizada a: ${status}` });
+
+                ws.send(JSON.stringify({
+                    event: 'notification',
+                    payload: { type: 'success', message: `Petición ${requestId} marcada como '${status}'.` }
+                }));
+                // Optionally, broadcast the update to all admins
+            } catch (error) {
+                console.error('[handleDevWorkflow] Error updating dev request:', error);
+                ws.send(JSON.stringify({ event: 'error', payload: `Error al actualizar la petición ${requestId}.` }));
+            }
+            break;
+    }
+}
+
+/**
+ * Handles a request from the client to load their chat history.
+ */
+async function handleHistoryRequest(ws, { userId }) {
+    try {
+        const messagesSnapshot = await db.collection('chatSessions').doc(userId).collection('messages').orderBy('timestamp', 'asc').limit(50).get();
+        const historyForClient = [];
+        const rawHistoryForAgent = []; // The format Vertex AI expects
+
+        messagesSnapshot.forEach(doc => {
+            const data = doc.data();
+            historyForClient.push({ id: doc.id, ...data });
+            rawHistoryForAgent.push({
+                role: data.role,
+                parts: data.content.map(p => {
+                    if (p.type === 'text') return { text: p.text };
+                    if (p.type === 'functionCall') return { functionCall: p.functionCall };
+                    if (p.type === 'functionResponse') return { functionResponse: p.functionResponse };
+                    return p;
+                })
+            });
+        });
+
+        ws.send(JSON.stringify({
+            event: 'history-loaded',
+            payload: { history: historyForClient, rawHistory: rawHistoryForAgent }
+        }));
+    } catch (error) {
+        console.error(`[handleHistoryRequest] Error for user ${userId}:`, error);
+        ws.send(JSON.stringify({ event: 'error', payload: 'No se pudo cargar el historial.' }));
+    }
+}
+
+// Lógica del Servidor WebSocket
+wss.on('connection', (ws) => {
+    console.log('[WebSocket] Cliente conectado.');
+
+    ws.on('message', async (message) => {
+        try {
+            const data = JSON.parse(message);
+            console.log('[WebSocket] Mensaje recibido:', data.event);
+
+            switch (data.event) {
+                case 'chat-message':
+                    await processWebSocketMessage(ws, data.payload);
+                    break;
+                case 'send-confirmed-quote':
+                    await handleSendQuote(ws, data.payload);
+                    break;
+                case 'request-history':
+                    await handleHistoryRequest(ws, data.payload);
+                    break;
+                case 'request-dev-requests':
+                case 'update-dev-request-status':
+                    await handleDevWorkflow(ws, data.event, data.payload);
+                    break;
+                default:
+                    console.warn(`[WebSocket] Evento desconocido recibido: ${data.event}`);
+            }
+        } catch (error) {
+            console.error('[WebSocket] Error procesando mensaje:', error);
+            ws.send(JSON.stringify({ event: 'error', payload: 'Error interno del servidor al procesar el mensaje.' }));
+        }
+    });
+
+    ws.on('close', () => {
+        console.log('[WebSocket] Cliente desconectado.');
+    });
 });
 
-// Iniciar el servidor para que escuche las peticiones en el puerto especificado
-server.listen(PORT, () => {
-  console.log(`El servidor de NyxOS está escuchando en el puerto ${PORT}`);
-  console.log('API REST y WebSocket listos para recibir conexiones.');
+
+// 4. Middleware de Manejo de Errores Centralizado
+app.use(errorHandler);
+
+server.listen(port, () => {
+    console.log(`Servidor de Nyx V3.0 (HTTP + WebSocket) escuchando en http://localhost:${port}`);
+});
+
+app.post('/api/nyx', (req, res) => {
+    // 1. Aquí validaremos la clave de la API (opcional, pero buena práctica)
+    const apiKey = req.body.api_key;
+    if (apiKey !== process.env.YOUR_API_KEY) { // Asume que la clave de API está en una variable de entorno
+        // res.status(401).send({ error: 'Unauthorized: Invalid API key' });
+        // return;
+    }
+
+    // 2. Procesa la petición del usuario que viene en el JSON
+    const userPrompt = req.body.prompt;
+    console.log(`[API] Petición recibida: "${userPrompt}"`);
+
+    // 3. Envía una respuesta de éxito para confirmar la conexión
+    res.status(200).send({
+        status: 'success',
+        message: 'NyxOS ha recibido tu petición.',
+        response: `Recibí tu mensaje: "${userPrompt}". El servidor está funcionando.`
+    });
 });
