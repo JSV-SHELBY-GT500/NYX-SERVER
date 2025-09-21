@@ -1,0 +1,25 @@
+{
+  "name": "nyxos-ai-server",
+  "version": "1.0.0",
+  "description": "Servidor principal para la inteligencia artificial NyxOS.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "ai",
+    "nyxos",
+    "nodejs",
+    "express",
+    "ia",
+    "websocket"
+  ],
+  "author": "NyxOS Project",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "ws": "^8.17.1"
+  }
+}
