@@ -1,5 +1,5 @@
 {
-  "name": "NYX SERVER",
-  "description": "An empty app",
+  "name": "NyxOS v3.0 Backend",
+  "description": "Backend for NyxOS v3, powered by Vertex AI and Firestore.",
   "requestFramePermissions": []
 }
